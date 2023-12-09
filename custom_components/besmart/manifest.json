@@ -1,11 +1,11 @@
 {
   "domain": "besmart",
-  "name": "HA BeSmart",
+  "name": "HA BeSim",
   "version": "0.1",
-  "documentation": "https://github.com/muchasuerte/ha-besmart",
-  "issue_tracker": "https://github.com/muchasuerte/ha-besmart/issues",
+  "documentation": "https://github.com/jimmyH/ha-besim",
+  "issue_tracker": "https://github.com/jimmyH/ha-besim/issues",
   "dependencies": [],
   "after_dependencies": ["http"],
-  "codeowners": ["@muchasuerte"],
+  "codeowners": ["@jimmyH"],
   "requirements": []
 }

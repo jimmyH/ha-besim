@@ -14,8 +14,9 @@ Configuration example:
 climate:
   - platform: Besmart
     name: Besmart Thermostat
-    username: USERNAME
-    password: 10080
+    url: http://besim-api.kagisoft.co.uk/api/v1.0/
+    device_id: 1675843714
+    room_id: 40499877
     room: Soggiorno
     scan_interval: 10
 
@@ -24,7 +25,7 @@ logging options:
 logger:
   default: info
   logs:
-    custom_components.climate.besmart: debug
+    custom_components.climate.besim: debug
 """
 import logging
 from datetime import datetime, timedelta
@@ -54,14 +55,16 @@ from homeassistant.const import (
     ATTR_STATE,
     ATTR_TEMPERATURE,
     CONF_NAME,
-    CONF_PASSWORD,
+    CONF_URL,
+    CONF_DEVICE_ID,
     CONF_ROOM,
-    CONF_USERNAME,
     STATE_OFF,
     STATE_ON,
     TEMP_CELSIUS,
     TEMP_FAHRENHEIT,
 )
+
+CONF_ROOM_ID = "room_id"
 
 _LOGGER = logging.getLogger(__name__)
 DEPENDENCIES = ["switch", "sensor"]
@@ -76,8 +79,9 @@ STATE_UNKNOWN = "unknown"
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-        vol.Required(CONF_USERNAME): cv.string,
-        vol.Required(CONF_PASSWORD): cv.string,
+        vol.Required(CONF_URL): cv.string,
+        vol.Required(CONF_DEVICE_ID): cv.string,
+        vol.Required(CONF_ROOM_ID): cv.string,
         vol.Required(CONF_ROOM): cv.string,
     }
 )
@@ -90,9 +94,9 @@ SUPPORT_FLAGS = (
 # pylint: disable=unused-argument
 def setup_platform(hass, config, add_devices, discovery_info=None):
     """Setup the Besmart thermostats."""
-    client = Besmart(config.get(CONF_USERNAME), config.get(CONF_PASSWORD))
+    client = Besmart(config.get(CONF_URL),config.get(CONF_DEVICE_ID))
     client.rooms()  # force init
-    add_devices([Thermostat(config.get(CONF_NAME), config.get(CONF_ROOM), client)])
+    add_devices([Thermostat(config.get(CONF_NAME), config.get(CONF_ROOM_ID), config.get(CONF_ROOM), client)])
 
 
 # pylint: disable=abstract-method
@@ -100,73 +104,51 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
 class Besmart(object):
     """Representation of a Besmart thermostat."""
 
-    BASE_URL = "http://www.besmart-home.com/Android_vokera_20160516/"
-    LOGIN = "login.php"
-    ROOM_MODE = "setRoomMode.php"
-    ROOM_LIST = "getRoomList.php?deviceId={0}"
-    ROOM_DATA = "getRoomData196.php?therId={0}&deviceId={1}"
-    ROOM_PROGRAM = "getProgram.php?roomId={0}"
-    ROOM_TEMP = "setRoomTemp.php"
-    ROOM_ECON_TEMP = "setEconTemp.php"
-    ROOM_FROST_TEMP = "setFrostTemp.php"
-    ROOM_CONF_TEMP = "setComfTemp.php"
+    ROOM_MODE = "devices/{0}/rooms/{1}/mode"
+    ROOM_DATA = "devices/{0}"
+    ROOM_ECON_TEMP = "devices/{0}/rooms/{1}/t1"
+    ROOM_FROST_TEMP = "devices/{0}/rooms/{1}/t2"
+    ROOM_CONF_TEMP = "devices/{0}/rooms/{1}/t3"
     GET_SETTINGS = "getSetting.php"
     SET_SETTINGS = "setSetting.php"
 
-    def __init__(self, username, password):
+    CONTENT_HDRS = { 'Content-Type' : 'application/json' }
+
+    def __init__(self, url,deviceId):
         """Initialize the thermostat."""
-        self._username = username
-        self._password = password
         self._lastupdate = None
-        self._device = None
+        self._url = url
+        self._deviceId = deviceId
         self._rooms = None
+        self._data = None
         self._timeout = 30
         self._s = requests.Session()
 
     def _fahToCent(self, temp):
-        return str(round((temp - 32.0) / 1.8, 1))
+        return round((temp - 32.0) / 1.8, 1)
 
     def _centToFah(self, temp):
-        return str(round(32.0 + (temp * 1.8), 1))
+        return round(32.0 + (temp * 1.8), 1)
 
-    def login(self):
+    def rooms(self):
         try:
-            resp = self._s.post(
-                self.BASE_URL + self.LOGIN,
-                data={"un": self._username, "pwd": self._password, "version": "32"},
+            _LOGGER.debug(self._url + self.ROOM_DATA.format(self._deviceId))
+            resp = self._s.get(
+                self._url + self.ROOM_DATA.format(self._deviceId),
                 timeout=self._timeout,
             )
             if resp.ok:
-                self._device = resp.json()
-        except Exception as ex:
-            _LOGGER.warning(ex)
-            self._device = None
+                self._lastupdate = datetime.now()
+                self._data = resp.json()
+                self._rooms = self._data.get('rooms',{}).keys()
+                _LOGGER.debug("rooms: {}".format(self._rooms))
+                if len(self._rooms) == 0:
+                    self._lastupdate = None
+                    return None
 
-    def rooms(self):
-        if not self._device:
-            self.login()
-
-        try:
-            if self._device:
-                resp = self._s.post(
-                    self.BASE_URL + self.ROOM_LIST.format(self._device.get("deviceId")),
-                    timeout=self._timeout,
-                )
-                if resp.ok:
-                    self._lastupdate = datetime.now()
-                    self._rooms = dict(
-                        (y.get("name").lower(), y)
-                        for y in filter(lambda x: x.get("id") != None, resp.json())
-                    )
-                    _LOGGER.debug("rooms: {}".format(self._rooms))
-                    if len(self._rooms) == 0:
-                        self._device = None
-                        self._lastupdate = None
-                        return None
-
-                    return self._rooms
-                else:
-                    _LOGGER.debug("get rooms failed!")
+                return self._rooms
+            else:
+                _LOGGER.debug("get rooms failed!")
         except Exception as ex:
             _LOGGER.warning(ex)
             self._device = None
@@ -174,26 +156,13 @@ class Besmart(object):
         return None
 
     def roomdata(self, room):
-        self.login()
-        try:
-            if self._device:
-                resp = self._s.get(
-                    self.BASE_URL
-                    + self.ROOM_DATA.format(
-                        room.get("therId"), self._device.get("deviceId")
-                    ),
-                    timeout=self._timeout,
-                )
-                if resp.ok:
-                    return resp.json()
-                else:
-                    _LOGGER.debug("refresh roomdata failed for: {}".format(room))
-        except Exception as ex:
-            _LOGGER.warning(ex)
-            self._device = None
+        if self._data is not None:
+            return self._data["rooms"][room]
 
         return None
 
+    '''
+    @todo program()
     def program(self, room):
         self.login()
         try:
@@ -207,84 +176,72 @@ class Besmart(object):
             _LOGGER.warning(ex)
             self._device = None
         return None
+    '''
 
-    def roomByName(self, name):
+    def roomById(self, roomId):
         if self._lastupdate is None or datetime.now() - self._lastupdate > timedelta(
             seconds=120
         ):
             _LOGGER.debug("refresh rooms state")
             self.rooms()
 
-        if self._rooms:
-            return self.roomdata(self._rooms.get(name.lower()))
+        if self._rooms and roomId in self._rooms:
+            return self.roomdata(roomId)
         return None
 
-    def setRoomMode(self, room_name, mode):
-        room = self.roomByName(room_name)
+    def setRoomMode(self, roomId, mode):
+        room = self.roomById(roomId)
 
-        if self._device and room:
-            data = {
-                "deviceId": self._device.get("deviceId"),
-                "therId": room.get("roomMark"),
-                "mode": mode,
-            }
+        if room:
+            url = self._url + self.ROOM_MODE.format(self._deviceId, roomId)
+            data = str(mode)
+            _LOGGER.debug("setRoomMode: {} {}".format(url,data))
+          
+            resp = self._s.put(url, headers=self.CONTENT_HDRS, data=data, timeout=self._timeout)
+            _LOGGER.debug("setRoomMode resp: {}".format(resp))
 
-            resp = self._s.post(
-                self.BASE_URL + self.ROOM_MODE, data=data, timeout=self._timeout
-            )
             if resp.ok:
                 msg = resp.json()
-                _LOGGER.debug("resp: {}".format(msg))
-                if msg.get("error") == 1:
-                    return True
+                return True
 
         return None
 
-    def setRoomConfortTemp(self, room_name, new_temp):
-        return self.setRoomTemp(room_name, new_temp, self.ROOM_CONF_TEMP)
+    def setRoomConfortTemp(self, roomId, new_temp):
+        return self.setRoomTemp(roomId, new_temp, self.ROOM_CONF_TEMP)
 
-    def setRoomECOTemp(self, room_name, new_temp):
-        return self.setRoomTemp(room_name, new_temp, self.ROOM_ECON_TEMP)
+    def setRoomECOTemp(self, roomId, new_temp):
+        return self.setRoomTemp(roomId, new_temp, self.ROOM_ECON_TEMP)
 
-    def setRoomFrostTemp(self, room_name, new_temp):
-        return self.setRoomTemp(room_name, new_temp, self.ROOM_FROST_TEMP)
+    def setRoomFrostTemp(self, roomId, new_temp):
+        return self.setRoomTemp(roomId, new_temp, self.ROOM_FROST_TEMP)
 
-    def setRoomTemp(self, room_name, new_temp, url=None):
-        url = url or self.ROOM_TEMP
-        room = self.roomByName(room_name)
-        if room and self._device.get("deviceId"):
-            new_temp = round(new_temp, 1)
+    def setRoomTemp(self, roomId, new_temp, url=None):
+        ''' new_temp must be degC*10 '''
+        url = url or self.ROOM_CONF_TEMP
+        room = self.roomById(roomId)
+        if room:
             _LOGGER.debug("room: {}".format(room))
 
-            if room.get("tempUnit") in {"N/A", "0"}:
-                tpCInt, tpCIntFloat = str(new_temp).split(".")
-            else:
-                tpCInt, tpCIntFloat = self._fahToCent(new_temp).split(".")
-
             _LOGGER.debug(
-                "setRoomTemp: {} - {} - {}".format(new_temp, tpCInt, tpCIntFloat)
+                "setRoomTemp: {}".format(new_temp)
             )
 
-            data = {
-                "deviceId": self._device.get("deviceId"),
-                "therId": room.get("roomMark"),
-                "tempSet": tpCInt + "",
-                "tempSetFloat": tpCIntFloat + "",
-            }
-            _LOGGER.debug("url: {}".format(self.BASE_URL + url))
-            _LOGGER.debug("data: {}".format(data))
-            resp = self._s.post(self.BASE_URL + url, data=data, timeout=self._timeout)
+            data = str(new_temp)
+
+            url = self._url + url.format(self._deviceId,roomId)
+            _LOGGER.debug("setRoomTemp: {} {}".format(url,data))
+            resp = self._s.put(url, headers=self.CONTENT_HDRS, data=data, timeout=self._timeout)
+            _LOGGER.debug("setRoomTemp resp: {}".format(resp))
             if resp.ok:
                 msg = resp.json()
-                _LOGGER.debug("resp: {}".format(msg))
-                if msg.get("error") == 1:
-                    return True
+                return True
         else:
             _LOGGER.warning("error on get the room by name: {}".format(room_name))
 
         return None
 
     def getSettings(self, room_name):
+        # @todo fix this
         room = self.roomByName(room_name)
 
         if self._device and room:
@@ -305,6 +262,7 @@ class Besmart(object):
         return None
 
     def setSettings(self, room_name, season):
+        # @todo fix this
         room = self.roomByName(room_name)
 
         if self._device and room:
@@ -379,27 +337,28 @@ class Thermostat(ClimateEntity):
     PRESET_MODE_LIST = list(PRESET_HA_TO_BESMART)
 
     HVAC_MODE_LIST = (HVAC_MODE_COOL, HVAC_MODE_HEAT)
-    HVAC_MODE_BESMART_TO_HA = {"1": HVAC_MODE_HEAT, "0": HVAC_MODE_COOL}
+    HVAC_MODE_BESMART_TO_HA = {1: HVAC_MODE_HEAT, 0: HVAC_MODE_COOL}
 
     # BeSmart Season
-    HVAC_MODE_HA_BESMART = {HVAC_MODE_HEAT: "1", HVAC_MODE_COOL: "0"}
+    HVAC_MODE_HA_BESMART = {HVAC_MODE_HEAT: 1, HVAC_MODE_COOL: 0}
 
-    def __init__(self, name, room, client):
+    def __init__(self, name, roomId, room, client):
         """Initialize the thermostat."""
         self._name = name
+        self._roomId = roomId
         self._room_name = room
         self._cl = client
         self._current_temp = 0
         self._current_state = self.IDLE
-        self._current_operation = ""
+        self._current_operation = 0
         self._current_unit = 0
         self._tempSetMark = 0
         self._heating_state = False
-        self._battery = "0"
+        self._battery = 0
         self._frostT = 0
         self._saveT = 0
         self._comfT = 0
-        self._season = "1"
+        self._season = 1
         self.update()
 
     @property
@@ -431,12 +390,26 @@ class Thermostat(ClimateEntity):
         """Return the list of supported features."""
         return SUPPORT_FLAGS
 
+    def convertReadingToCurrentUnits(self,temp):
+        if self._current_unit==0:
+            return float(temp)/10
+        else:
+            return self._cl._centToFah(float(temp)/10)
+
+    def convertTemp(self,temp):
+        if self._current_unit==0:
+            return int(temp*10)
+        else:
+            return int(self._cl._fahToCent(temp)*10)
+
     def update(self):
         """Update the data from the thermostat."""
         _LOGGER.debug("Update called")
-        data = self._cl.roomByName(self._room_name)
+        data = self._cl.roomById(self._roomId)
         _LOGGER.debug(data)
-        if data and data.get("error") == 0:
+        if data:
+            '''
+            @todo Handle program
             try:
                 # from Sunday (0) to Saturday (6)
                 today = datetime.today().isoweekday() % 7
@@ -452,37 +425,43 @@ class Thermostat(ClimateEntity):
             except Exception as ex:
                 _LOGGER.warning(ex)
                 self._tempSetMark = "2"
+            '''
 
             try:
-                self._battery =not bool(int(data.get("bat"))) #corrected to raise battery alert in ha 1=problem status false
+                #self._battery =not bool(int(data.get("bat"))) #corrected to raise battery alert in ha 1=problem status false
+                #@todo BeSim doesn't get battery status yet :(
+                self._battery = 0
             except ValueError:
-                self._battery = "0"
+                self._battery = 0
+
+            self._current_unit = data.get("units",0)
 
             try:
-                self._frostT = float(data.get("frostT"))
+                self._frostT = self.convertReadingToCurrentUnits(data.get("t1"))
             except ValueError:
                 self._frostT = 5.0
             try:
-                self._saveT = float(data.get("saveT"))
+                self._saveT = self.convertReadingToCurrentUnits(data.get("t2"))
             except ValueError:
                 self._saveT = 16.0
 
             try:
-                self._comfT = float(data.get("comfT"))
+                self._comfT = self.convertReadingToCurrentUnits(data.get("t3"))
             except ValueError:
                 self._comfT = 20.0
             try:
-                self._current_temp = float(data.get("tempNow"))
+                self._current_temp = self.convertReadingToCurrentUnits(data.get("temp"))
             except ValueError:
                 self._current_temp = 20.0
 
-            self._heating_state = data.get("heating", "") == "1"
+            self._heating_state = data.get("heating", 0) == 1
             try:
                 self._current_state = int(data.get("mode"))
             except ValueError:
-                self._current_temp = 0
-            self._current_unit = data.get("tempUnit")
-            self._season = data.get("season")
+                self._current_state = 0
+            self._season = data.get("winter")
+            self._current_operation = data.get("winter")
+            
 
     @property
     def name(self):
@@ -500,12 +479,13 @@ class Thermostat(ClimateEntity):
             "save_t": self._saveT,
             "season_mode": self.hvac_mode,
             "heating_state": self._heating_state,
+            "units": self._current_unit
         }
 
     @property
     def temperature_unit(self):
         """Return the unit of measurement."""
-        if self._current_unit == "0":
+        if self._current_unit == 0:
             return TEMP_CELSIUS
         else:
             return TEMP_FAHRENHEIT
@@ -559,7 +539,7 @@ class Thermostat(ClimateEntity):
         """Set HVAC mode (comfort, home, sleep, Party, Off)."""
 
         mode = self.PRESET_HA_TO_BESMART.get(preset_mode, self.AUTO)
-        self._cl.setRoomMode(self._room_name, mode)
+        self._cl.setRoomMode(self._roomId, mode)
         _LOGGER.debug("Set operation mode=%s(%s)", str(preset_mode), str(mode))
 
     def set_temperature(self, **kwargs):
@@ -573,10 +553,11 @@ class Thermostat(ClimateEntity):
                 temperature, target_temp_low, target_temp_high
             )
         )
+
         if temperature:
-            self._cl.setRoomConfortTemp(self._room_name, temperature)
-            # self._cl.setRoomFrostTemp(self._room_name, temperature)
+            self._cl.setRoomConfortTemp(self._roomId, self.convertTemp(temperature))
+            # self._cl.setRoomFrostTemp(self._roomId, self.convertTemp(temperature))
         if target_temp_high:
-            self._cl.setRoomConfortTemp(self._room_name, target_temp_high)
+            self._cl.setRoomConfortTemp(self._roomId, self.convertTemp(target_temp_high))
         if target_temp_low:
-            self._cl.setRoomECOTemp(self._room_name, target_temp_low)
+            self._cl.setRoomECOTemp(self._roomId, self.convertTemp(target_temp_low))
