@@ -106,8 +106,8 @@ class Besmart(object):
 
     ROOM_MODE = "devices/{0}/rooms/{1}/mode"
     ROOM_DATA = "devices/{0}"
-    ROOM_ECON_TEMP = "devices/{0}/rooms/{1}/t1"
-    ROOM_FROST_TEMP = "devices/{0}/rooms/{1}/t2"
+    ROOM_FROST_TEMP = "devices/{0}/rooms/{1}/t1"
+    ROOM_ECON_TEMP = "devices/{0}/rooms/{1}/t2"
     ROOM_CONF_TEMP = "devices/{0}/rooms/{1}/t3"
     GET_SETTINGS = "getSetting.php"
     SET_SETTINGS = "setSetting.php"
@@ -180,7 +180,7 @@ class Besmart(object):
 
     def roomById(self, roomId):
         if self._lastupdate is None or datetime.now() - self._lastupdate > timedelta(
-            seconds=120
+            seconds=20
         ):
             _LOGGER.debug("refresh rooms state")
             self.rooms()
@@ -378,6 +378,11 @@ class Thermostat(ClimateEntity):
     def target_temperature_step(self):
         """Return the supported step of target temperature."""
         return 0.2
+
+    @property
+    def unique_id(self):
+        """Return the unique id of this thermostat."""
+        return self._roomId
 
     @property
     def should_poll(self):

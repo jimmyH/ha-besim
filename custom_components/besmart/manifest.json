@@ -1,7 +1,7 @@
 {
   "domain": "besmart",
   "name": "HA BeSim",
-  "version": "0.1",
+  "version": "0.2",
   "documentation": "https://github.com/jimmyH/ha-besim",
   "issue_tracker": "https://github.com/jimmyH/ha-besim/issues",
   "dependencies": [],
