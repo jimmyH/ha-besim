@@ -16,11 +16,13 @@ Configuration example:
 ```yaml
 climate:
   - platform: besmart
-    name: Besmart Thermostat
     url: http://<your BeSim server>/api/v1.0/
     device_id: <your device id>
-    room_id: <your room id>
-    room: Soggiorno
+    rooms:
+      - name: Landing
+        room_id: <room id>
+      - name: Kitchen
+        room_id: <room id>
     scan_interval: 10
 
 logging options:

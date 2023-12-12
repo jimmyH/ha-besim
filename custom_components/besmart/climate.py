@@ -1,31 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Support for Riello's Besmart thermostats.
-Be aware the thermostat may require more then 3 minute to refresh its states.
-
-The thermostats support the season switch however this control will be managed with a 
-different control.
-
-version: 2
-tested with home-assistant >= 0.96
-
-Configuration example:
-
-climate:
-  - platform: Besmart
-    name: Besmart Thermostat
-    url: http://besim-api.kagisoft.co.uk/api/v1.0/
-    device_id: 1675843714
-    room_id: 40499877
-    room: Soggiorno
-    scan_interval: 10
-
-logging options:
-
-logger:
-  default: info
-  logs:
-    custom_components.climate.besim: debug
 """
 import logging
 from datetime import datetime, timedelta
@@ -57,7 +32,6 @@ from homeassistant.const import (
     CONF_NAME,
     CONF_URL,
     CONF_DEVICE_ID,
-    CONF_ROOM,
     STATE_OFF,
     STATE_ON,
     TEMP_CELSIUS,
@@ -65,6 +39,7 @@ from homeassistant.const import (
 )
 
 CONF_ROOM_ID = "room_id"
+CONF_ROOMS = "rooms"
 
 _LOGGER = logging.getLogger(__name__)
 DEPENDENCIES = ["switch", "sensor"]
@@ -76,13 +51,18 @@ DEFAULT_TIMEOUT = 3
 ATTR_MODE = "mode"
 STATE_UNKNOWN = "unknown"
 
+THERMOSTAT_SCHEMA = vol.Schema(
+  {
+    vol.Required(CONF_NAME, default=DEFAULT_NAME): cv.string,
+    vol.Required(CONF_ROOM_ID): cv.string
+  }
+)
+
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
-        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
         vol.Required(CONF_URL): cv.string,
         vol.Required(CONF_DEVICE_ID): cv.string,
-        vol.Required(CONF_ROOM_ID): cv.string,
-        vol.Required(CONF_ROOM): cv.string,
+        vol.Required(CONF_ROOMS): vol.All(cv.ensure_list, [THERMOSTAT_SCHEMA])
     }
 )
 
@@ -96,7 +76,10 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     """Setup the Besmart thermostats."""
     client = Besmart(config.get(CONF_URL),config.get(CONF_DEVICE_ID))
     client.rooms()  # force init
-    add_devices([Thermostat(config.get(CONF_NAME), config.get(CONF_ROOM_ID), config.get(CONF_ROOM), client)])
+    devices = []
+    for room in config.get(CONF_ROOMS):
+      devices.append(Thermostat(room.get(CONF_NAME),room.get(CONF_ROOM_ID),client))
+    add_devices(devices)
 
 
 # pylint: disable=abstract-method
@@ -179,10 +162,7 @@ class Besmart(object):
     '''
 
     def roomById(self, roomId):
-        if self._lastupdate is None or datetime.now() - self._lastupdate > timedelta(
-            seconds=20
-        ):
-            _LOGGER.debug("refresh rooms state")
+        if self._lastupdate is None or datetime.now() - self._lastupdate > timedelta(seconds=20):
             self.rooms()
 
         if self._rooms and roomId in self._rooms:
@@ -342,11 +322,10 @@ class Thermostat(ClimateEntity):
     # BeSmart Season
     HVAC_MODE_HA_BESMART = {HVAC_MODE_HEAT: 1, HVAC_MODE_COOL: 0}
 
-    def __init__(self, name, roomId, room, client):
+    def __init__(self, name, roomId, client):
         """Initialize the thermostat."""
         self._name = name
         self._roomId = roomId
-        self._room_name = room
         self._cl = client
         self._current_temp = 0
         self._current_state = self.IDLE
@@ -358,13 +337,16 @@ class Thermostat(ClimateEntity):
         self._frostT = 0
         self._saveT = 0
         self._comfT = 0
+        self._current_setpoint = 3 # 3=T3, 2=T2, 1=T1
+        self._set_temp = 0
         self._season = 1
+        self._last_seen = 0
         self.update()
 
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
-        return self._comfT
+        return self._set_temp
 
     @property
     def target_temperature_high(self):
@@ -387,7 +369,6 @@ class Thermostat(ClimateEntity):
     @property
     def should_poll(self):
         """Polling needed for thermostat."""
-        _LOGGER.debug("Should_Poll called")
         return True
 
     @property
@@ -409,10 +390,11 @@ class Thermostat(ClimateEntity):
 
     def update(self):
         """Update the data from the thermostat."""
-        _LOGGER.debug("Update called")
         data = self._cl.roomById(self._roomId)
-        _LOGGER.debug(data)
-        if data:
+        if data and data.get('lastseen',0)>self._last_seen:
+            _LOGGER.debug('updating room: {} {}'.format(self._roomId,data))
+            self._last_seen = data.get('lastseen',0)
+
             '''
             @todo Handle program
             try:
@@ -441,23 +423,11 @@ class Thermostat(ClimateEntity):
 
             self._current_unit = data.get("units",0)
 
-            try:
-                self._frostT = self.convertReadingToCurrentUnits(data.get("t1"))
-            except ValueError:
-                self._frostT = 5.0
-            try:
-                self._saveT = self.convertReadingToCurrentUnits(data.get("t2"))
-            except ValueError:
-                self._saveT = 16.0
-
-            try:
-                self._comfT = self.convertReadingToCurrentUnits(data.get("t3"))
-            except ValueError:
-                self._comfT = 20.0
-            try:
-                self._current_temp = self.convertReadingToCurrentUnits(data.get("temp"))
-            except ValueError:
-                self._current_temp = 20.0
+            self._frostT = self.convertReadingToCurrentUnits(data.get("t1",5))
+            self._saveT = self.convertReadingToCurrentUnits(data.get("t2",16))
+            self._comfT = self.convertReadingToCurrentUnits(data.get("t3",20))
+            self._current_temp = self.convertReadingToCurrentUnits(data.get("temp",20))
+            self._set_temp = self.convertReadingToCurrentUnits(data.get("settemp",20))
 
             self._heating_state = data.get("heating", 0) == 1
             try:
@@ -466,7 +436,23 @@ class Thermostat(ClimateEntity):
                 self._current_state = 0
             self._season = data.get("winter")
             self._current_operation = data.get("winter")
-            
+
+            # Try and work out the current active setpoint
+            # If all else fails we assume it is T3
+            if data.get("settemp") == data.get("t3"):
+              self._current_setpoint = 3
+            elif data.get("settemp") == data.get("t2"):
+              self._current_setpoint = 2
+            elif data.get("settemp") == data.get("t1"):
+              self._current_setpoint = 1
+            elif data.get("settemp") >= data.get("t3")-4 or data.get("settemp") <= data.get("t3")+4:
+              self._current_setpoint = 3
+            elif data.get("settemp") >= data.get("t2")-4 or data.get("settemp") <= data.get("t2")+4:
+              self._current_setpoint = 2
+            elif data.get("settemp") >= data.get("t1")-4 or data.get("settemp") <= data.get("t1")+4:
+              self._current_setpoint = 1
+            else:
+              self._current_setpoint = 3
 
     @property
     def name(self):
@@ -484,7 +470,9 @@ class Thermostat(ClimateEntity):
             "save_t": self._saveT,
             "season_mode": self.hvac_mode,
             "heating_state": self._heating_state,
-            "units": self._current_unit
+            "units": self._current_unit,
+            "current_setpoint": self._current_setpoint,
+            "last_seen": self._last_seen
         }
 
     @property
@@ -560,8 +548,12 @@ class Thermostat(ClimateEntity):
         )
 
         if temperature:
-            self._cl.setRoomConfortTemp(self._roomId, self.convertTemp(temperature))
-            # self._cl.setRoomFrostTemp(self._roomId, self.convertTemp(temperature))
+            if self._current_setpoint == 1:
+              self._cl.setRoomFrostTemp(self._roomId, self.convertTemp(temperature))
+            elif self._current_setpoint == 2:
+              self._cl.setRoomECOTemp(self._roomId, self.convertTemp(target_temp_low))
+            else:
+              self._cl.setRoomConfortTemp(self._roomId, self.convertTemp(temperature))
         if target_temp_high:
             self._cl.setRoomConfortTemp(self._roomId, self.convertTemp(target_temp_high))
         if target_temp_low:
